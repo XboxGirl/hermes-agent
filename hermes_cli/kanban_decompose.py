@@ -31,6 +31,9 @@ from hermes_cli.kanban_specify import (
 )
 from hermes_cli.kanban_specify import _profile_author as _specify_author
 
+# Local import inside _build_roster for lane_launchers (avoids import-time
+# config load; lane_launchers() handles its own config load lazily).
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,6 +75,12 @@ Rules:
   - Pick assignees from the roster by matching the task to the profile's
     DESCRIPTION (not just the name). When nothing matches well, use null
     and the system will route to the default_assignee.
+  - ROUTING PRIORITY: For any LARGE or LONG coding task (multi-file
+    changes, new features, refactors, anything likely to take more than a
+    few minutes of focused coding), assign it to the "opencode" lane.
+    Use "implementer" ONLY for SMALL changes or small tweaks (one-file
+    fixes, minor edits, quick patches, config tweaks). NEVER assign a
+    long or big coding task to "implementer" — it is not built for that.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
 
@@ -169,7 +178,29 @@ def _build_roster() -> tuple[list[dict], set[str]]:
             "description": desc or f"(no description; profile named {p.name!r})",
             "has_description": bool(desc),
         })
-    return roster, {p.name for p in all_profiles}
+        valid.add(p.name)
+    # Lane assignees (control-plane lanes like ``opencode``) appear in the
+    # roster as pseudo-profiles so the decomposer can route work to them.
+    # Only configured lanes (kanban.lane_launchers) are listed — nothing
+    # speculative. Descriptions come from kanban.lane_descriptions.
+    try:
+        _cfg = _load_config()
+    except Exception:
+        _cfg = {}
+    lane_descriptions = (
+        _cfg.get("kanban", {}).get("lane_descriptions", {})
+        if isinstance(_cfg, dict)
+        else {}
+    )
+    for lane in kb.lane_launchers():
+        lane_desc = lane_descriptions.get(lane, "").strip()
+        roster.append({
+            "name": lane,
+            "description": lane_desc or f"(lane: {lane} — external agent)",
+            "has_description": bool(lane_desc),
+        })
+        valid.add(lane)
+    return roster, valid
 
 
 def _format_roster(roster: list[dict]) -> str:
