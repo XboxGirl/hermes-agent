@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from hermes_constants import get_default_hermes_root, get_hermes_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,7 +20,9 @@ def _get_auxiliary_task_config(task: str, _seen: frozenset = frozenset()) -> Dic
     declared defaults layered under user config (user wins); built-in defaults live in DEFAULT_CONFIG.
     A task registered with ``inherit_from`` is resolved here, at read time, over the base task's
     effective config, so it follows the base's current settings (and the active profile's config)
-    until the user pins a route on the task itself. ``_seen`` guards re-registration cycles."""
+    until the user pins a route on the task itself. Under a profile process the profile's
+    ``auxiliary.<task>`` block is layered over the GLOBAL config's (see
+    ``_profile_auxiliary_override``). ``_seen`` guards re-registration cycles."""
     if not task:
         return {}
     try:
@@ -30,6 +34,7 @@ def _get_auxiliary_task_config(task: str, _seen: frozenset = frozenset()) -> Dic
     task_config = aux.get(task, {}) if isinstance(aux, dict) else {}
     if not isinstance(task_config, dict):
         task_config = {}
+    task_config = _profile_auxiliary_override(task, task_config)
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
         for _entry in get_plugin_auxiliary_tasks():
@@ -48,6 +53,54 @@ def _get_auxiliary_task_config(task: str, _seen: frozenset = frozenset()) -> Dic
     except Exception:  # health: allow BLE001 -- plugin discovery must never break aux config reads
         logger.debug("plugin auxiliary task lookup failed for %r", task, exc_info=True)
     return task_config
+
+
+def _profile_auxiliary_override(task: str, task_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Layer the ACTIVE PROFILE's ``auxiliary.<task>`` block over the GLOBAL config's.
+
+    A profile process reads its own ``~/.hermes/profiles/<name>/config.yaml`` (``HERMES_HOME``
+    points there), but profile setups scaffold every ``auxiliary`` task with ``provider: auto``
+    / ``model: ''`` placeholders, which would shadow the global route (compaction would follow
+    the profile primary instead of the configured compaction model). This resolves the GLOBAL
+    ``auxiliary.<task>`` and applies the profile block with the same layering semantics as
+    ``_layer_over_inherited``: placeholders mean "follow the base", a pinned route comes wholly
+    from the profile block, and non-route keys override per key. The global read uses a
+    context-local ``HERMES_HOME`` override so no ``os.environ`` mutation leaks to concurrent
+    readers; anything that fails leaves *task_config* untouched."""
+    profile_home = get_hermes_home()
+    try:
+        default_root = get_default_hermes_root()
+        if profile_home.resolve() == default_root.resolve():
+            return task_config  # default profile: HERMES_HOME already IS the global home
+    except Exception:
+        return task_config
+
+    try:
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _global_home():
+            from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+            token = set_hermes_home_override(str(default_root))
+            try:
+                yield
+            finally:
+                reset_hermes_home_override(token)
+
+        from hermes_cli.config import load_config_readonly
+        with _global_home():
+            global_config = load_config_readonly()
+        global_aux = global_config.get("auxiliary", {}) if isinstance(global_config, dict) else {}
+        global_task = global_aux.get(task, {}) if isinstance(global_aux, dict) else {}
+        if not isinstance(global_task, dict):
+            global_task = {}
+    except Exception:  # global read failed: keep the profile-effective block, never break the call
+        logger.debug("global auxiliary.<%s> read failed; using profile block only", task, exc_info=True)
+        return task_config
+
+    if global_task == task_config:
+        return task_config
+    return _layer_over_inherited(global_task, task_config)
 
 
 # The fields that together pick WHERE a call goes. They travel as one unit: a provider pinned on an
