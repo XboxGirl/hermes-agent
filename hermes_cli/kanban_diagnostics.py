@@ -684,7 +684,27 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     (default 30 min). Deliberately age-based and identity-agnostic so it
     catches typo'd assignees, deleted profiles, and down external worker
     pools alike without a registry to curate. Unassigned tasks are excluded —
-    the dispatcher's ``skipped_unassigned`` already covers them."""
+    the dispatcher's ``skipped_unassigned`` already covers them.
+
+    Local fork (XboxGirl-local-fixes, 2026-10-22, Sirius-approved): two
+    queueing-normal suppressions so control-plane lanes and serialized
+    profiles don't false-positive while they legitimately wait.
+
+    1. Recent ``skipped_nonspawnable`` on THIS task: the dispatcher has
+       evaluated the card and deliberately deferred it to an external lane
+       (e.g. ``opencode``). A fresh skip means the dispatch layer is healthy
+       and the card is queueing by design, not stranded. The suppression
+       expires with the same threshold — a card still unclaimed after
+       ``stranded_threshold_seconds`` past its LAST skip re-arms the alert
+       (a genuinely dead external pool then surfaces as before).
+
+    2. Same-profile busy: when ``cfg["_running_profiles"]`` (board-wide
+       ``set`` of assignees with a ``running`` task, injected by the call
+       sites that slurp the board) contains this task's assignee, the card
+       is queued behind same-lane work — normal serialization, not a stall.
+       Call sites that don't inject it keep the old behavior (rule stays
+       identity-agnostic there).
+    """
     threshold_seconds = float(cfg.get("stranded_threshold_seconds", 30 * 60))
     if _task_field(task, "status") != "ready":
         return []
@@ -694,6 +714,13 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     assignee = _task_field(task, "assignee") or ""
     if not assignee.strip():
         return []
+
+    last_skip_ts = _latest_event_ts(events, {"skipped_nonspawnable"})
+    if last_skip_ts and (now - last_skip_ts) < threshold_seconds:
+        return []  # dispatcher deferred it to an external lane recently — queueing by design
+    running_profiles = cfg.get("_running_profiles")
+    if isinstance(running_profiles, (set, frozenset, list)) and assignee in running_profiles:
+        return []  # same-profile lane is busy — normal serialization
 
     # Most recent event that put the task into ready; with none (old task /
     # truncated events) fall back to created_at — over-flagging an ancient

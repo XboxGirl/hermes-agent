@@ -644,6 +644,9 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             task = kb.get_task(conn, args.task)
             if task is None:
                 return _err(f"no such task: {args.task}")
+            diag_config = {**diag_config, "_running_profiles": {
+                r["assignee"] for r in conn.execute(
+                    "SELECT DISTINCT assignee FROM tasks WHERE status = 'running' AND assignee IS NOT NULL")}}
             diags_by_task = {args.task: kd.compute_task_diagnostics(
                 task, kb.list_events(conn, args.task), kb.list_runs(conn, args.task),
                 graph=kb.task_graph_context(conn, args.task), config=diag_config)}
@@ -656,6 +659,13 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                 ev_by = _rows_by_task(conn, "task_events", ids)
                 run_by = _rows_by_task(conn, "task_runs", ids)
                 graph_by = kb.task_graph_contexts(conn, ids)
+                # Board-wide busy-profile set for the stranded_in_ready
+                # suppression (XboxGirl-local-fixes 2026-10-22): a ready card
+                # queued behind a same-profile running task is normal
+                # serialization, not a stall.
+                diag_config = {**diag_config, "_running_profiles": {
+                    r["assignee"] for r in conn.execute(
+                        "SELECT DISTINCT assignee FROM tasks WHERE status = 'running' AND assignee IS NOT NULL")}}
                 for r in rows:
                     tid = r["id"]
                     dl = kd.compute_task_diagnostics(r, ev_by.get(tid, []), run_by.get(tid, []),

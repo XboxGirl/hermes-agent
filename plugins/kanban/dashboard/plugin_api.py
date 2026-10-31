@@ -225,6 +225,14 @@ def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[
     events_by_task = _rows_by_task("task_events")
     runs_by_task = _rows_by_task("task_runs")
     graph_by_task = kanban_db.task_graph_contexts(conn, row_ids)
+    # Board-wide busy-profile set for the stranded_in_ready suppression
+    # (XboxGirl-local-fixes 2026-10-22): a ready card queued behind a
+    # same-profile running task is normal serialization, not a stall.
+    running_profiles = {
+        r["assignee"] for r in conn.execute(
+            "SELECT DISTINCT assignee FROM tasks WHERE status = 'running' AND assignee IS NOT NULL")
+    }
+    diag_config = {**diag_config, "_running_profiles": running_profiles}
     out: dict[str, list[dict]] = {}
     for r in rows:
         tid = r["id"]
